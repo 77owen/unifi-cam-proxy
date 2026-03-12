@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         g++ \
         libjpeg-dev \
         libc6-dev \
-        linux-headers-generic \
         rustc \
         zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
