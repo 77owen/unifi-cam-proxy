@@ -1,7 +1,7 @@
 ARG version=3.9
 ARG tag=${version}-alpine3.17
 
-FROM python:${tag} as builder
+FROM python:${tag} AS builder
 WORKDIR /app
 ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
@@ -20,7 +20,7 @@ RUN apk add --update \
 
 RUN pip install -U pip wheel setuptools maturin
 COPY requirements.txt .
-RUN pip install -r requirements.txt --no-build-isolation
+RUN pip install -r requirements.txt
 
 
 FROM python:${tag}
