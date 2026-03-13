@@ -105,7 +105,6 @@ class RLC410Camera:
         )
         parser.add_argument(
             "--stream",
-            "-m",
             default="main",
             type=str,
             choices=["main", "sub"],
