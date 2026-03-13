@@ -86,7 +86,6 @@ class RLC410Camera:
         """Add RLC-410 specific arguments to the argument parser."""
         parser.add_argument(
             "--ffmpeg-args",
-            "-f",
             default="-c:v copy -ar 32000 -ac 1 -codec:a aac -b:a 32k",
             help="Transcoding args for `ffmpeg -i <src> <args> <dst>`",
         )

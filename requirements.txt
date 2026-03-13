@@ -2,6 +2,7 @@ aiohttp
 backoff
 coloredlogs
 flvlib3@https://github.com/zkonge/flvlib3/archive/master.zip
+opencv-python
 packaging
 pydantic<2.0
 pyunifiprotect @ https://github.com/bdraco/pyunifiprotect/archive/refs/heads/master.zip
