@@ -99,7 +99,6 @@ class RLC410Camera:
         parser.add_argument("--password", "-p", required=True, help="Camera password")
         parser.add_argument(
             "--channel",
-            "-c",
             default=0,
             type=int,
             help="Camera channel (default: 0)",
