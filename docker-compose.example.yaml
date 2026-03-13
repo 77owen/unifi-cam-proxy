@@ -1,0 +1,41 @@
+# Example docker-compose configuration for unifi-cam-proxy
+# Copy this file to docker-compose.yaml and modify the values for your setup
+
+services:
+  # Example: Single Reolink camera proxy
+  proxy-1:
+    restart: unless-stopped
+    image: ghcr.io/77owen/unifi-cam-proxy:latest
+    volumes:
+      - "./client.pem:/client.pem"
+    command: >-
+      unifi-cam-proxy
+      --host 192.168.1.113
+      -i 10.0.1.50
+      --mac '02:00:00:00:00:01'
+      --cert /client.pem
+      --token BNgRB0C8Sp9XFwM7oFGlrkTIlOzg8CCF
+      reolink
+      -u admin
+      -p 123456
+      -s "sub"
+      --ffmpeg-args='-c:v copy -bsf:v "h264_metadata=tick_rate=30000/1001" -ar 32000 -ac 1 -codec:a aac -b:a 32k'
+
+  # Example: Second camera (uncomment and customize)
+  # proxy-2:
+  #   restart: unless-stopped
+  #   image: ghcr.io/77owen/unifi-cam-proxy:latest
+  #   volumes:
+  #     - "./client2.pem:/client.pem"
+  #   command: >-
+  #     unifi-cam-proxy
+  #     --host 192.168.1.114
+  #     -i 10.0.1.51
+  #     --mac '02:00:00:00:00:02'
+  #     --cert /client.pem
+  #     --token YOUR_TOKEN_HERE
+  #     reolink
+  #     -u admin
+  #     -p YOUR_PASSWORD
+  #     -s "sub"
+  #     --ffmpeg-args='-c:v copy -bsf:v "h264_metadata=tick_rate=30000/1001" -ar 32000 -ac 1 -codec:a aac -b:a 32k'

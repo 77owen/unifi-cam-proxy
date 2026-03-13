@@ -1,4 +1,4 @@
-ARG version=3.9
+ARG version=3.12
 ARG tag=${version}-slim-bookworm
 
 FROM python:${tag} AS builder
@@ -33,11 +33,10 @@ COPY --from=builder \
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         netcat-openbsd \
-        libusb-1.0-0-dev \
+        libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY . .
-RUN pip install . --no-cache-dir
 
 COPY ./docker/entrypoint.sh /
 

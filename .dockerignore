@@ -1,11 +1,43 @@
+# Version Control
+.git/
+.github/
+.gitignore
+
+# Python Build Artifacts
 *.pyc
-build
-dist
-docs
+**/*.pyc
+**/__pycache__/
 *.egg-info
-venv
-client.pem
-run/
+build/
+dist/
 MANIFEST
 MANIFEST.in
+
+# Virtual Environments
+venv/
+.venv/
+
+# IDE and Editor Settings
+.vscode/
 .pyre/
+
+# Documentation
+*.md
+docs/
+
+# Testing
+tests/
+
+# Docker Files (not needed in image)
+docker-compose.yaml
+.dockerignore
+
+# Project Planning
+plans/
+
+# Runtime Files
+run/
+*.log
+
+# Secrets (should be mounted, not copied)
+client.pem
