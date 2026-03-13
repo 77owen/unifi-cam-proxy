@@ -6,5 +6,20 @@
     "python.linting.enabled": true,
     "editor.tabSize": 4,
     "editor.detectIndentation": false,
-    "ninetyfive.indexingEnabled": "ask"
+    "ninetyfive.indexingEnabled": "ask",
+    "workbench.colorCustomizations": {
+        "editor.lineHighlightBackground": "#1073cf2d",
+        "editor.lineHighlightBorder": "#9fced11f",
+        "titleBar.activeBackground": "#570FAC",
+        "titleBar.activeForeground": "#FBF9FE",
+        "titleBar.inactiveBackground": "#3E0B7B",
+        "titleBar.inactiveForeground": "#FBF9FE",
+        "statusBar.background": "#3E0B7B",
+        "statusBar.foreground": "#FBF9FE",
+        "statusBar.debuggingBackground": "#3E0B7B",
+        "statusBar.debuggingForeground": "#FBF9FE",
+        "statusBar.noFolderBackground": "#3E0B7B",
+        "statusBar.noFolderForeground": "#FBF9FE"
+    },
+    "windowColors.baseColor": "#cba6f7"
 }
