@@ -1,15 +1,10 @@
-from unifi.cams.dahua import DahuaCam
-from unifi.cams.frigate import FrigateCam
-from unifi.cams.hikvision import HikvisionCam
-from unifi.cams.reolink import Reolink
-from unifi.cams.reolink_nvr import ReolinkNVRCam
-from unifi.cams.rtsp import RTSPCam
+"""
+UniFi Camera Proxy - Camera implementations.
 
-__all__ = [
-    "FrigateCam",
-    "HikvisionCam",
-    "DahuaCam",
-    "RTSPCam",
-    "Reolink",
-    "ReolinkNVRCam",
-]
+This package contains camera implementations for the unifi-cam-proxy.
+Currently supports only the Reolink RLC-410-5MP camera.
+"""
+
+from unifi.cams.rlc410 import RLC410Camera
+
+__all__ = ["RLC410Camera"]
