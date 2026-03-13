@@ -9,16 +9,14 @@ services:
     volumes:
       - "./client.pem:/client.pem"
     command: >-
-      unifi-cam-proxy
       --host 192.168.1.113
-      -i 10.0.1.50
+      --ip 10.0.1.50
       --mac '02:00:00:00:00:01'
       --cert /client.pem
       --token BNgRB0C8Sp9XFwM7oFGlrkTIlOzg8CCF
-      reolink
-      -u admin
-      -p 123456
-      -s "sub"
+      --username admin
+      --password 123456
+      --substream "sub"
       --ffmpeg-args='-c:v copy -bsf:v "h264_metadata=tick_rate=30000/1001" -ar 32000 -ac 1 -codec:a aac -b:a 32k'
 
   # Example: Second camera (uncomment and customize)
@@ -28,14 +26,12 @@ services:
   #   volumes:
   #     - "./client2.pem:/client.pem"
   #   command: >-
-  #     unifi-cam-proxy
   #     --host 192.168.1.114
-  #     -i 10.0.1.51
+  #     --ip 10.0.1.51
   #     --mac '02:00:00:00:00:02'
   #     --cert /client.pem
   #     --token YOUR_TOKEN_HERE
-  #     reolink
-  #     -u admin
-  #     -p YOUR_PASSWORD
-  #     -s "sub"
+  #     --username admin
+  #     --password YOUR_PASSWORD
+  #     --substream "sub"
   #     --ffmpeg-args='-c:v copy -bsf:v "h264_metadata=tick_rate=30000/1001" -ar 32000 -ac 1 -codec:a aac -b:a 32k'

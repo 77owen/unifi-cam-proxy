@@ -4,15 +4,14 @@ services:
     container_name: unifi-cam-proxy
     volumes:
       - './client.pem:/client.pem'
-    environment:
-      # UniFi Protect NVR settings
-      - "UBIQUITI_ADDRESS=192.168.1.1"
-      - "UBIQUITI_PORT=7442"
-      - "UBIQUITI_MAC=AABBCCDDEEFF"
-      # Camera settings
-      - "CAMERA_HOST=192.168.1.100"
-      - "CAMERA_USERNAME=admin"
-      - "CAMERA_PASSWORD=password"
+    command: >-
+      --host 192.168.1.1
+      --mac 'AABBCCDDEEFF'
+      --cert /client.pem
+      --token YOUR_TOKEN_HERE
+      --ip 192.168.1.100
+      --username admin
+      --password password
     restart: unless-stopped
     depends_on:
       - unifi-protect
