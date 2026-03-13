@@ -41,4 +41,4 @@ COPY . .
 COPY ./docker/entrypoint.sh /
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["unifi-cam-proxy"]
+CMD ["python", "-m", "unifi.main"]
