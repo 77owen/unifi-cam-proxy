@@ -4,10 +4,11 @@ A simplified Docker container that allows you to connect a Reolink RLC-410-5MP c
 
 ## Features
 
-- **Video Streaming**: RTSP streams from camera (main and sub streams)
+- **Video Streaming**: RTSP streams from camera (main and sub streams) with pure Python streaming
 - **Motion Detection**: HTTP polling via Reolink API
 - **Audio Support**: Audio streaming from camera
 - **Simple Setup**: Single camera type, minimal configuration
+- **Robust Streaming**: Async Python-based streaming with automatic reconnection and error handling
 
 ## Requirements
 
@@ -114,6 +115,26 @@ By default, the proxy uses:
 - `sub` stream for the secondary video feed
 
 You can change these with `--stream` and `--substream` options.
+
+## Environment Variables
+
+The following environment variables can be used to configure the proxy:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `UNIFI_USE_PYTHON_STREAMING` | Use Python-based streaming (recommended). Set to `false` to use legacy shell pipeline (deprecated). | `true` |
+| `UNIFI_VERIFY_SSL` | Verify SSL certificates. Set to `false` to disable SSL verification (not recommended for production). | `true` |
+
+### Streaming Architecture
+
+The proxy uses a pure Python streaming implementation by default, which provides:
+
+- **Robust error handling**: Automatic reconnection with exponential backoff
+- **Proper process management**: FFmpeg subprocess lifecycle handled via asyncio
+- **Clock synchronization**: Inline FLV timestamp injection without separate processes
+- **Clean shutdown**: Graceful termination of streams on exit
+
+If you encounter issues with Python streaming, you can fall back to the legacy shell pipeline by setting `UNIFI_USE_PYTHON_STREAMING=false`. Note that the shell pipeline is deprecated and will be removed in a future version.
 
 ## Troubleshooting
 

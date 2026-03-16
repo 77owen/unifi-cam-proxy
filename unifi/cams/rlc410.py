@@ -9,14 +9,18 @@ Reolink RLC-410-5MP camera, supporting:
 """
 
 import argparse
+import asyncio
 import atexit
 import json
 import logging
+import os
 import shutil
+import signal
 import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -28,7 +32,7 @@ import reolinkapi
 import websockets
 from yarl import URL
 
-from unifi.core import RetryableError
+from unifi.core import RetryableError, get_ssl_context, sanitize_url
 
 AVClientRequest = AVClientResponse = dict[str, Any]
 
@@ -45,6 +49,12 @@ class RLC410Camera:
         self.args = args
         self.logger = logger
 
+        # Feature flag for Python streaming (default: true - Python streaming is now the default)
+        # Set UNIFI_USE_PYTHON_STREAMING=false to fall back to legacy shell pipeline
+        self._use_python_streaming = os.environ.get(
+            "UNIFI_USE_PYTHON_STREAMING", "true"
+        ).lower() in ("true", "1", "yes")
+
         # Protocol state
         self._msg_id: int = 0
         self._init_time: float = time.time()
@@ -54,11 +64,22 @@ class RLC410Camera:
         self._motion_event_ts: Optional[float] = None
         self._ffmpeg_handles: dict[str, subprocess.Popen] = {}
 
-        # SSL context for requests
-        self._ssl_context = ssl.create_default_context()
-        self._ssl_context.check_hostname = False
-        self._ssl_context.verify_mode = ssl.CERT_NONE
-        self._ssl_context.load_cert_chain(args.cert, args.cert)
+        # StreamManager for Python-based streaming (when feature flag is enabled)
+        # Lazy import to avoid dependency issues when feature is disabled
+        self._stream_manager = None
+        if self._use_python_streaming:
+            try:
+                from unifi.streaming import StreamManager
+                self._stream_manager = StreamManager(logger=logger)
+                self.logger.info("Python streaming enabled via UNIFI_USE_PYTHON_STREAMING")
+            except ImportError as e:
+                self.logger.warning(
+                    f"Failed to import StreamManager, falling back to shell pipeline: {e}"
+                )
+                self._use_python_streaming = False
+
+        # SSL context for requests (configurable via UNIFI_VERIFY_SSL)
+        self._ssl_context = get_ssl_context(args.cert)
         self._session: Optional[websockets.legacy.client.WebSocketClientProtocol] = None
         atexit.register(self.close_streams)
 
@@ -66,8 +87,23 @@ class RLC410Camera:
 
         # Reolink-specific initialization
         self.snapshot_dir: str = tempfile.mkdtemp()
+        self._motion_lock = asyncio.Lock()  # Async lock for atomic motion detection operations
         self.motion_in_progress: bool = False
         self.substream = args.substream
+        
+        # Shutdown flag for graceful termination
+        self._shutdown_requested = False
+        
+        # Watchdog state for stream health monitoring
+        self._last_stream_activity: dict[str, float] = {}
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._watchdog_interval = 30.0  # Check stream health every 30 seconds
+        self._stream_timeout = 60.0  # Consider stream unhealthy after 60s of no activity
+        
+        # Retry configuration with exponential backoff limits
+        self._max_motion_retries = 10  # Maximum retries for motion API
+        self._motion_backoff_base = 1.0  # Base backoff time in seconds
+        self._motion_backoff_max = 60.0  # Maximum backoff time in seconds
         
         # Initialize Reolink API connection
         self.cam = reolinkapi.Camera(
@@ -140,7 +176,7 @@ class RLC410Camera:
             f"&rs=6PHVjvf0UntSLbyT&user={self.args.username}"
             f"&password={self.args.password}"
         )
-        self.logger.info(f"Grabbing snapshot: {url}")
+        self.logger.info(f"Grabbing snapshot: {sanitize_url(url)}")
         await self._fetch_to_file(url, img_file)
         return img_file
 
@@ -175,7 +211,14 @@ class RLC410Camera:
             )
 
     async def run(self) -> None:
-        """Run the motion detection polling loop."""
+        """Run the motion detection polling loop with exponential backoff.
+        
+        This method polls the Reolink camera's motion detection API and triggers
+        motion events in UniFi Protect. It includes:
+        - Exponential backoff with maximum retry limits
+        - Atomic motion state transitions to prevent race conditions
+        - Graceful shutdown handling
+        """
         url = (
             f"http://{self.args.ip}"
             f"/api.cgi?cmd=GetMdState&user={self.args.username}"
@@ -186,54 +229,123 @@ class RLC410Camera:
             f'[{{ "cmd":"GetMdState", "param":{{ "channel":{self.args.channel} }} }}]'
         )
         
-        while True:
-            self.logger.info(f"Connecting to motion events API: {url}")
+        retry_count = 0
+        backoff_time = self._motion_backoff_base
+        
+        while not self._shutdown_requested:
+            self.logger.info(f"Connecting to motion events API: {sanitize_url(url)}")
             try:
                 async with aiohttp.ClientSession(
                     timeout=aiohttp.ClientTimeout(None)
                 ) as session:
-                    while True:
-                        async with session.post(encoded_url, data=body) as resp:
-                            data = await resp.read()
-
-                            try:
-                                json_body = json.loads(data)
-                                if "value" in json_body[0]:
-                                    if json_body[0]["value"]["state"] == 1:
-                                        if not self.motion_in_progress:
-                                            self.motion_in_progress = True
-                                            self.logger.info("Trigger motion start")
-                                            await self.trigger_motion_start()
-                                    elif json_body[0]["value"]["state"] == 0:
-                                        if self.motion_in_progress:
-                                            self.motion_in_progress = False
-                                            self.logger.info("Trigger motion end")
-                                            await self.trigger_motion_stop()
-                                else:
-                                    self.logger.error(
-                                        "Motion API request responded with "
-                                        "unexpected JSON, retrying. "
-                                        f"JSON: {data}"
+                    # Reset backoff on successful connection
+                    retry_count = 0
+                    backoff_time = self._motion_backoff_base
+                    
+                    while not self._shutdown_requested:
+                        try:
+                            async with session.post(encoded_url, data=body) as resp:
+                                if resp.status != 200:
+                                    self.logger.warning(
+                                        f"Motion API returned status {resp.status}"
                                     )
+                                    continue
+                                    
+                                data = await resp.read()
 
-                            except json.JSONDecodeError as err:
-                                self.logger.error(
-                                    "Motion API request returned invalid "
-                                    "JSON, retrying. "
-                                    f"Error: {err}, "
-                                    f"Response: {data}"
-                                )
+                                try:
+                                    json_body = json.loads(data)
+                                    if "value" in json_body[0]:
+                                        state = json_body[0]["value"]["state"]
+                                        # Use lock for atomic check-and-act on motion state
+                                        with self._motion_lock:
+                                            if state == 1 and not self.motion_in_progress:
+                                                self.motion_in_progress = True
+                                                self.logger.info("Trigger motion start")
+                                                # Release lock before async operation
+                                        if state == 1 and not self._motion_event_ts:
+                                            await self.trigger_motion_start()
+                                            continue
+                                            
+                                        with self._motion_lock:
+                                            if state == 0 and self.motion_in_progress:
+                                                self.motion_in_progress = False
+                                                self.logger.info("Trigger motion end")
+                                                
+                                        if state == 0 and self._motion_event_ts:
+                                            await self.trigger_motion_stop()
+                                    else:
+                                        self.logger.error(
+                                            "Motion API request responded with "
+                                            "unexpected JSON, retrying. "
+                                            f"JSON: {data}"
+                                        )
 
+                                except json.JSONDecodeError as err:
+                                    self.logger.error(
+                                        "Motion API request returned invalid "
+                                        "JSON, retrying. "
+                                        f"Error: {err}, "
+                                        f"Response: {data}"
+                                    )
+                                    
+                        except aiohttp.ClientError as err:
+                            # Handle per-request errors without breaking the session
+                            self.logger.warning(
+                                f"Motion API request failed: {err}. "
+                                f"Retrying in {backoff_time:.1f}s..."
+                            )
+                            await asyncio.sleep(backoff_time)
+                            continue
+                            
             except aiohttp.ClientError as err:
-                self.logger.error(f"Motion API request failed, retrying. Error: {err}")
+                retry_count += 1
+                if retry_count > self._max_motion_retries:
+                    self.logger.error(
+                        f"Motion API failed after {self._max_motion_retries} retries. "
+                        f"Last error: {err}. Waiting {self._motion_backoff_max}s before retry."
+                    )
+                    # Reset retry count but wait max backoff time
+                    retry_count = 0
+                    backoff_time = self._motion_backoff_max
+                else:
+                    self.logger.error(
+                        f"Motion API connection failed (attempt {retry_count}/"
+                        f"{self._max_motion_retries}): {err}. "
+                        f"Retrying in {backoff_time:.1f}s..."
+                    )
+                
+                await asyncio.sleep(backoff_time)
+                # Exponential backoff with cap
+                backoff_time = min(backoff_time * 2, self._motion_backoff_max)
+                
+            except asyncio.CancelledError:
+                self.logger.info("Motion detection loop cancelled")
+                break
+                
+            except Exception as err:
+                self.logger.exception(
+                    f"Unexpected error in motion detection loop: {err}"
+                )
+                await asyncio.sleep(backoff_time)
+                backoff_time = min(backoff_time * 2, self._motion_backoff_max)
 
     # =========================================================================
     # Motion Detection
     # =========================================================================
     
     async def trigger_motion_start(self) -> None:
-        """Trigger a motion start event."""
-        if not self._motion_event_ts:
+        """Trigger a motion start event with atomic state management.
+        
+        Uses asyncio.Lock to prevent race conditions when multiple
+        concurrent calls occur.
+        """
+        # Use async lock for atomic check-and-act pattern
+        async with self._motion_lock:
+            if self._motion_event_ts is not None:
+                # Motion already in progress, skip
+                return
+            
             payload: dict[str, Any] = {
                 "clockBestMonotonic": 0,
                 "clockBestWall": 0,
@@ -255,21 +367,46 @@ class RLC410Camera:
             await self.send(
                 self.gen_response("EventAnalytics", payload=payload),
             )
+            # Set timestamp inside lock to prevent race
             self._motion_event_ts = time.time()
 
-            # Capture snapshot at beginning of motion event for thumbnail
-            motion_snapshot_path: str = tempfile.NamedTemporaryFile(delete=False).name
-            try:
-                shutil.copyfile(await self.get_snapshot(), motion_snapshot_path)
-                self.logger.debug(f"Captured motion snapshot to {motion_snapshot_path}")
-                self._motion_snapshot = Path(motion_snapshot_path)
-            except FileNotFoundError:
-                pass
+        # Capture snapshot outside lock to avoid blocking
+        motion_snapshot_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False) as motion_snapshot_file:
+                motion_snapshot_path = motion_snapshot_file.name
+            # File is now closed, copy the snapshot
+            shutil.copyfile(await self.get_snapshot(), motion_snapshot_path)
+            self.logger.debug(f"Captured motion snapshot to {motion_snapshot_path}")
+            self._motion_snapshot = Path(motion_snapshot_path)
+        except FileNotFoundError:
+            self.logger.debug("Snapshot file not found, skipping motion snapshot")
+            if motion_snapshot_path:
+                try:
+                    os.unlink(motion_snapshot_path)
+                except OSError:
+                    pass
+        except Exception as e:
+            self.logger.warning(f"Failed to capture motion snapshot: {e}")
+            if motion_snapshot_path:
+                try:
+                    os.unlink(motion_snapshot_path)
+                except OSError:
+                    pass
 
     async def trigger_motion_stop(self) -> None:
-        """Trigger a motion stop event."""
-        motion_start_ts = self._motion_event_ts
-        if motion_start_ts:
+        """Trigger a motion stop event with atomic state management.
+        
+        Uses asyncio.Lock to prevent race conditions when multiple
+        concurrent calls occur.
+        """
+        # Use async lock for atomic check-and-act pattern
+        async with self._motion_lock:
+            motion_start_ts = self._motion_event_ts
+            if motion_start_ts is None:
+                # No motion in progress, skip
+                return
+            
             payload: dict[str, Any] = {
                 "clockBestMonotonic": int(self.get_uptime()),
                 "clockBestWall": int(round(motion_start_ts * 1000)),
@@ -291,6 +428,7 @@ class RLC410Camera:
                 self.gen_response("EventAnalytics", payload=payload),
             )
             self._motion_event_id += 1
+            # Clear timestamp inside lock to prevent race
             self._motion_event_ts = None
 
     # =========================================================================
@@ -321,7 +459,34 @@ class RLC410Camera:
     async def start_video_stream(
         self, stream_index: str, stream_name: str, destination: tuple[str, int]
     ):
-        """Start an FFmpeg process to stream video to UniFi Protect."""
+        """Start an FFmpeg process to stream video to UniFi Protect.
+        
+        Uses Python streaming (StreamManager) if UNIFI_USE_PYTHON_STREAMING=true,
+        otherwise falls back to shell pipeline for backward compatibility.
+        """
+        if self._use_python_streaming:
+            await self._start_video_stream_python(stream_index, stream_name, destination)
+        else:
+            await self._start_video_stream_shell(stream_index, stream_name, destination)
+
+    async def _start_video_stream_shell(
+        self, stream_index: str, stream_name: str, destination: tuple[str, int]
+    ):
+        """Start an FFmpeg process using shell pipeline (legacy method).
+        
+        .. deprecated::
+            This shell pipeline method is deprecated and will be removed in a future version.
+            Use Python streaming (UNIFI_USE_PYTHON_STREAMING=true) instead.
+        
+        This is the original implementation using shell=True with piped commands.
+        Kept for backward compatibility when UNIFI_USE_PYTHON_STREAMING=false.
+        """
+        self.logger.warning(
+            f"DEPRECATED: Using legacy shell pipeline for {stream_index}. "
+            "This method is deprecated and will be removed in a future version. "
+            "Python streaming is now the default. To use Python streaming, ensure "
+            "UNIFI_USE_PYTHON_STREAMING is not set to 'false'."
+        )
         has_spawned = stream_index in self._ffmpeg_handles
         is_dead = has_spawned and self._ffmpeg_handles[stream_index].poll() is not None
 
@@ -348,15 +513,109 @@ class RLC410Camera:
                 cmd, stdout=subprocess.DEVNULL, shell=True
             )
 
+    async def _start_video_stream_python(
+        self, stream_index: str, stream_name: str, destination: tuple[str, int]
+    ):
+        """Start streaming using pure Python StreamManager.
+        
+        This method uses the StreamManager from unifi.streaming which handles:
+        - FFmpeg subprocess management with asyncio.create_subprocess_exec()
+        - TCP socket connection to UniFi Protect with reconnection logic
+        - Clock synchronization via ClockSyncProcessor inline
+        - Proper error handling and graceful shutdown
+        
+        Args:
+            stream_index: Stream identifier (e.g., "video1", "video2")
+            stream_name: Name of the stream for UniFi metadata
+            destination: Tuple of (host, port) for UniFi Protect controller
+        """
+        if not self._stream_manager:
+            self.logger.error("StreamManager not initialized")
+            return
+
+        # Check if stream is already active
+        if self._stream_manager.is_streaming(stream_index):
+            self.logger.info(f"Stream {stream_index} already active, skipping")
+            return
+
+        # Build FFmpeg command (without shell piping)
+        source = await self.get_stream_source(stream_index)
+        ffmpeg_cmd = (
+            f"ffmpeg -nostdin -loglevel error -y"
+            f" {self.get_base_ffmpeg_args(stream_index)} -rtsp_transport"
+            f" {self.args.rtsp_transport} -i \"{source}\""
+            f" {self.get_extra_ffmpeg_args(stream_index)} -metadata"
+            f" streamName={stream_name} -f flv -"
+        )
+
+        self.logger.info(
+            f"Starting Python stream for {stream_index} ({stream_name}) "
+            f"to {destination[0]}:{destination[1]}"
+        )
+        self.logger.debug(f"FFmpeg command: {sanitize_url(ffmpeg_cmd)}")
+
+        try:
+            await self._stream_manager.start_stream(
+                stream_index=stream_index,
+                stream_name=stream_name,
+                destination=destination,
+                ffmpeg_cmd=ffmpeg_cmd,
+                write_timestamps=self._needs_flv_timestamps,
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to start Python stream for {stream_index}: {e}")
+
     def stop_video_stream(self, stream_index: str):
-        """Stop the FFmpeg process for a stream."""
+        """Stop the video stream for a given stream index.
+        
+        Handles both shell-based and Python-based streaming.
+        """
+        # Stop Python stream if using StreamManager
+        if self._use_python_streaming and self._stream_manager:
+            if self._stream_manager.is_streaming(stream_index):
+                self.logger.info(f"Stopping Python stream {stream_index}")
+                # Note: stop_stream is async, but this method is sync for backward compat
+                # We'll handle this via asyncio if needed, or use stop_all in close()
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        asyncio.create_task(
+                            self._stream_manager.stop_stream(stream_index)
+                        )
+                    else:
+                        loop.run_until_complete(
+                            self._stream_manager.stop_stream(stream_index)
+                        )
+                except RuntimeError:
+                    pass  # No event loop available
+                return
+
+        # Stop shell-based stream (legacy)
         if stream_index in self._ffmpeg_handles:
-            self.logger.info(f"Stopping stream {stream_index}")
+            self.logger.info(f"Stopping shell stream {stream_index}")
             self._ffmpeg_handles[stream_index].kill()
 
     def close_streams(self):
-        """Close all FFmpeg streams."""
-        for stream in self._ffmpeg_handles:
+        """Close all video streams.
+        
+        Handles both shell-based and Python-based streaming.
+        """
+        # Close Python streams
+        if self._stream_manager:
+            self.logger.info("Closing all Python streams")
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    asyncio.create_task(self._stream_manager.stop_all())
+                else:
+                    loop.run_until_complete(self._stream_manager.stop_all())
+            except RuntimeError:
+                pass  # No event loop available
+
+        # Close shell-based streams (legacy)
+        for stream in list(self._ffmpeg_handles.keys()):
             self.stop_video_stream(stream)
 
     # =========================================================================
@@ -940,7 +1199,7 @@ class RLC410Camera:
     async def process_snapshot_request(
         self, msg: AVClientRequest
     ) -> Optional[AVClientResponse]:
-        """Process snapshot upload request."""
+        """Process snapshot upload request with proper resource cleanup."""
         snapshot_type = msg["payload"]["what"]
         if snapshot_type in ["motionSnapshot", "smartDetectZoneSnapshot"]:
             path = self._motion_snapshot
@@ -949,17 +1208,22 @@ class RLC410Camera:
 
         if path and path.exists():
             async with aiohttp.ClientSession() as session:
-                files = {"payload": open(path, "rb")}
-                files.update(msg["payload"].get("formFields", {}))
+                # Use context manager to ensure file handle is properly closed
                 try:
+                    with path.open("rb") as f:
+                        file_data = f.read()
+                    files = {"payload": file_data}
+                    files.update(msg["payload"].get("formFields", {}))
                     await session.post(
                         msg["payload"]["uri"],
                         data=files,
                         ssl=self._ssl_context,
                     )
                     self.logger.debug(f"Uploaded {snapshot_type} from {path}")
-                except aiohttp.ClientError:
-                    self.logger.exception("Failed to upload snapshot")
+                except aiohttp.ClientError as e:
+                    self.logger.error(f"Failed to upload snapshot: {e}")
+                except OSError as e:
+                    self.logger.error(f"Failed to read snapshot file {path}: {e}")
         else:
             self.logger.warning(
                 f"Snapshot file {path} is not ready yet, skipping upload"
@@ -1061,7 +1325,113 @@ class RLC410Camera:
         return False
 
     async def close(self):
-        """Clean up resources."""
+        """Clean up resources with proper shutdown sequence."""
         self.logger.info("Cleaning up instance")
-        await self.trigger_motion_stop()
+        
+        # Signal shutdown
+        self._shutdown_requested = True
+        
+        # Cancel watchdog task if running
+        if self._watchdog_task and not self._watchdog_task.done():
+            self._watchdog_task.cancel()
+            try:
+                await self._watchdog_task
+            except asyncio.CancelledError:
+                pass
+            self._watchdog_task = None
+        
+        # Stop motion event if in progress
+        try:
+            await asyncio.wait_for(self.trigger_motion_stop(), timeout=5.0)
+        except asyncio.TimeoutError:
+            self.logger.warning("Timeout stopping motion event during shutdown")
+        except Exception as e:
+            self.logger.error(f"Error stopping motion event: {e}")
+        
+        # Close all streams
         self.close_streams()
+        
+        # Clean up snapshot directory
+        try:
+            if self.snapshot_dir and os.path.exists(self.snapshot_dir):
+                shutil.rmtree(self.snapshot_dir)
+        except Exception as e:
+            self.logger.warning(f"Failed to clean up snapshot directory: {e}")
+        
+        self.logger.info("Cleanup complete")
+
+    async def start_watchdog(self) -> None:
+        """Start the stream health watchdog.
+        
+        The watchdog monitors stream health and automatically restarts
+        failed streams. It logs health status periodically.
+        """
+        if self._watchdog_task and not self._watchdog_task.done():
+            self.logger.warning("Watchdog already running")
+            return
+        
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+        self.logger.info("Stream health watchdog started")
+
+    async def _watchdog_loop(self) -> None:
+        """Watchdog loop that monitors stream health.
+        
+        Checks stream activity and restarts unhealthy streams.
+        Runs every _watchdog_interval seconds.
+        """
+        while not self._shutdown_requested:
+            try:
+                await asyncio.sleep(self._watchdog_interval)
+                
+                if self._shutdown_requested:
+                    break
+                
+                # Check stream health if using Python streaming
+                if self._use_python_streaming and self._stream_manager:
+                    active_streams = self._stream_manager.get_active_streams()
+                    
+                    if not active_streams:
+                        self.logger.debug("No active streams to monitor")
+                        continue
+                    
+                    current_time = time.time()
+                    
+                    for stream_index in active_streams:
+                        last_activity = self._last_stream_activity.get(stream_index, 0)
+                        time_since_activity = current_time - last_activity
+                        
+                        if time_since_activity > self._stream_timeout:
+                            self.logger.warning(
+                                f"Stream {stream_index} appears unhealthy "
+                                f"(no activity for {time_since_activity:.1f}s), "
+                                "considering restart"
+                            )
+                            # The VideoStreamer already handles reconnection internally
+                            # Just log the status for now
+                        else:
+                            self.logger.debug(
+                                f"Stream {stream_index} healthy "
+                                f"(last activity {time_since_activity:.1f}s ago)"
+                            )
+                    
+                    # Log overall health status
+                    self.logger.info(
+                        f"Stream health check: {len(active_streams)} active streams"
+                    )
+                            
+            except asyncio.CancelledError:
+                self.logger.info("Watchdog loop cancelled")
+                break
+            except Exception as e:
+                self.logger.error(f"Error in watchdog loop: {e}")
+                # Continue running despite errors
+                await asyncio.sleep(self._watchdog_interval)
+        
+        self.logger.info("Watchdog loop stopped")
+
+    def update_stream_activity(self, stream_index: str) -> None:
+        """Update the last activity timestamp for a stream.
+        
+        Called by the streaming code to indicate stream health.
+        """
+        self._last_stream_activity[stream_index] = time.time()

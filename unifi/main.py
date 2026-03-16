@@ -7,6 +7,7 @@ A simplified proxy for connecting Reolink RLC-410-5MP cameras to UniFi Protect.
 import argparse
 import asyncio
 import logging
+import signal
 import sys
 from shutil import which
 
@@ -16,6 +17,32 @@ from pyunifiprotect import ProtectApiClient
 from unifi.cams import RLC410Camera
 from unifi.core import Core
 from unifi.version import __version__
+
+# Global references for signal handlers
+_core_instance = None
+_cam_instance = None
+_shutdown_triggered = False
+
+
+def _signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
+    global _shutdown_triggered
+    logger = logging.getLogger("Core")
+    signal_name = signal.Signals(signum).name
+    logger.info(f"Received {signal_name}, initiating graceful shutdown...")
+    _shutdown_triggered = True
+    
+    if _core_instance:
+        _core_instance.request_shutdown()
+    
+    if _cam_instance:
+        _cam_instance._shutdown_requested = True
+
+
+def _setup_signal_handlers():
+    """Set up signal handlers for graceful shutdown."""
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
 
 
 def parse_args():
@@ -148,6 +175,8 @@ async def generate_token(args, logger):
 
 async def run():
     """Main async entry point."""
+    global _core_instance, _cam_instance
+    
     args = parse_args()
 
     core_logger = logging.getLogger("Core")
@@ -174,16 +203,35 @@ async def run():
         core_logger.error("A valid token is required")
         sys.exit(1)
 
+    # Set up signal handlers before creating instances
+    _setup_signal_handlers()
+
     # Create camera instance and start
-    cam = RLC410Camera(args, class_logger)
-    c = Core(args, cam, core_logger)
-    await c.run()
+    _cam_instance = RLC410Camera(args, class_logger)
+    _core_instance = Core(args, _cam_instance, core_logger)
+    
+    try:
+        await _core_instance.run()
+    except asyncio.CancelledError:
+        core_logger.info("Main task cancelled, shutting down...")
+    finally:
+        # Clean up camera resources
+        if _cam_instance:
+            try:
+                await _cam_instance.close()
+            except Exception as e:
+                core_logger.debug(f"Error during camera cleanup: {e}")
 
 
 def main():
     """Main entry point."""
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run())
+    try:
+        loop.run_until_complete(run())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        loop.close()
 
 
 if __name__ == "__main__":

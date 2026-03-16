@@ -1,37 +1,367 @@
-# Example docker-compose configuration for unifi-cam-proxy
-# Copy this file to docker-compose.yaml and modify the values for your setup
+# =============================================================================
+# UniFi Camera Proxy - Docker Compose Example
+# =============================================================================
+# 
+# This example demonstrates how to configure the UniFi Camera Proxy for
+# connecting Reolink RLC-410 cameras (and similar) to UniFi Protect.
+#
+# Usage:
+#   1. Copy this file to docker-compose.yaml
+#   2. Modify the values for your setup (look for "CHANGE_ME" comments)
+#   3. Generate adoption tokens using the UniFi Protect web interface
+#   4. Run: docker-compose up -d
+#
+# Prerequisites:
+#   - Docker and Docker Compose installed
+#   - Client certificate files (client.pem) for each camera
+#   - Adoption tokens from UniFi Protect NVR
+#   - Network connectivity between Docker container and cameras/NVR
+#
+# =============================================================================
+
+version: "3.8"
+
+# =============================================================================
+# Network Configuration (Optional)
+# =============================================================================
+# Uncomment if you need to specify a custom network for camera communication
+# networks:
+#   camera_net:
+#     driver: bridge
+#     ipam:
+#       config:
+#         - subnet: 192.168.100.0/24
 
 services:
-  # Example: Single Reolink camera proxy
-  proxy-1:
-    restart: unless-stopped
+  # ===========================================================================
+  # Camera 1 - Front Door (Reolink RLC-410)
+  # ===========================================================================
+  front-door:
     image: ghcr.io/77owen/unifi-cam-proxy:latest
+    container_name: unifi-cam-front-door
+    restart: unless-stopped
+    
+    # ---------------------------------------------------------------------------
+    # Environment Variables - Feature Flags
+    # ---------------------------------------------------------------------------
+    # These control optional features added during the refactoring.
+    environment:
+      # Python Streaming (NEW - Recommended)
+      # -------------------------------
+      # Uses pure Python for stream processing instead of fragile shell pipelines.
+      # This is more robust and provides better error handling.
+      # - true (default): Use Python-based streaming (recommended)
+      # - false: Use legacy shell pipeline (fallback)
+      - UNIFI_USE_PYTHON_STREAMING=true
+      
+      # SSL Certificate Verification (NEW)
+      # ----------------------------------
+      # Controls whether SSL certificates are verified when connecting to UniFi Protect.
+      # - true (default): Verify SSL certificates (secure)
+      # - false: Disable verification (useful for self-signed certs)
+      - UNIFI_VERIFY_SSL=true
+    
+    # ---------------------------------------------------------------------------
+    # Volume Mounts
+    # ---------------------------------------------------------------------------
+    # Mount the client certificate generated during camera adoption.
+    # Each camera needs its own unique certificate file.
     volumes:
-      - "./client.pem:/client.pem"
+      - "./certs/front-door.pem:/client.pem:ro"  # CHANGE_ME: path to your cert file
+    
+    # ---------------------------------------------------------------------------
+    # Command Line Arguments
+    # ---------------------------------------------------------------------------
+    # All configuration is passed via command arguments.
+    # See below for detailed explanation of each option.
     command: >-
-      --host 192.168.1.113
+      --host 192.168.1.100:7442
       --ip 10.0.1.50
-      --mac '02:00:00:00:00:01'
+      --mac "02:00:00:00:00:01"
       --cert /client.pem
       --token BNgRB0C8Sp9XFwM7oFGlrkTIlOzg8CCF
       --username admin
-      --password 123456
-      --substream "sub"
-      --ffmpeg-args='-c:v copy -bsf:v "h264_metadata=tick_rate=30000/1001" -ar 32000 -ac 1 -codec:a aac -b:a 32k'
+      --password "your_camera_password_here"
+      --name "Front Door"
+      --model "UVC G3"
+      --stream main
+      --substream sub
+      --ffmpeg-args "-c:v copy -bsf:v h264_metadata=tick_rate=30000/1001 -ar 32000 -ac 1 -codec:a aac -b:a 32k"
+    
+    # Command argument reference:
+    # ---------------------------
+    # --host          UniFi Protect NVR IP address and port (CHANGE_ME)
+    #                 Format: IP:PORT (typically port 7442 for adoption)
+    #
+    # --ip            IP address shown in UniFi Protect UI (CHANGE_ME)
+    #                 This is the IP that will appear in the Protect interface
+    #
+    # --mac           Unique MAC address for this virtual camera (CHANGE_ME)
+    #                 Must be unique per camera. Use format: XX:XX:XX:XX:XX:XX
+    #                 Recommendation: Use 02:00:00:XX:XX:XX pattern for uniqueness
+    #
+    # --cert          Path to client certificate file (mounted in volumes)
+    #                 This certificate is generated when adopting the camera
+    #
+    # --token         Adoption token from UniFi Protect (CHANGE_ME)
+    #                 Get this from: Protect > Settings > Cameras > Manage > Adopt
+    #
+    # --username      Camera's RTSP username (CHANGE_ME)
+    #                 Usually "admin" for Reolink cameras
+    #
+    # --password      Camera's RTSP password (CHANGE_ME)
+    #
+    # --name          Display name in UniFi Protect (optional, default: RLC-410-5MP)
+    #
+    # --model         Camera model to emulate (optional, default: UVC G3)
+    #                 Options: UVC G3, UVC G4 Bullet, UVC G4 Pro, etc.
+    #
+    # --stream        Main stream quality (optional, default: main)
+    #                 Options: main (high quality), sub (lower quality)
+    #
+    # --substream     Sub stream quality (optional, default: sub)
+    #                 Options: main, sub
+    #
+    # --ffmpeg-args   FFmpeg transcoding arguments (optional)
+    #                 Default: "-c:v copy -ar 32000 -ac 1 -codec:a aac -b:a 32k"
+    #
+    # --rtsp-transport RTSP transport protocol (optional, default: tcp)
+    #                 Options: tcp, udp, http, udp_multicast
+    #
+    # --channel       Camera channel number (optional, default: 0)
+    #                 For multi-channel cameras/NVRs
+    #
+    # --verbose       Enable debug logging (optional)
+    #
+    # --nvr-username  UniFi NVR username (optional, for auto token generation)
+    # --nvr-password  UniFi NVR password (optional, for auto token generation)
 
-  # Example: Second camera (uncomment and customize)
-  # proxy-2:
-  #   restart: unless-stopped
+    # ---------------------------------------------------------------------------
+    # Network Configuration (Optional)
+    # ---------------------------------------------------------------------------
+    # Uncomment to use host network mode for better streaming performance
+    # network_mode: host
+    
+    # Or use custom network defined above
+    # networks:
+    #   - camera_net
+
+    # ---------------------------------------------------------------------------
+    # Resource Limits (Optional)
+    # ---------------------------------------------------------------------------
+    # Adjust based on number of cameras and stream quality
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: 512M
+    #     reservations:
+    #       cpus: '0.5'
+    #       memory: 256M
+
+    # ---------------------------------------------------------------------------
+    # Health Check (Optional)
+    # ---------------------------------------------------------------------------
+    # healthcheck:
+    #   test: ["CMD", "nc", "-z", "localhost", "7442"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 10s
+
+    # ---------------------------------------------------------------------------
+    # Logging Configuration
+    # ---------------------------------------------------------------------------
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ===========================================================================
+  # Camera 2 - Backyard (Reolink RLC-410)
+  # ===========================================================================
+  # This example shows a second camera with different settings.
+  # Uncomment and customize for your setup.
+  
+  # backyard:
   #   image: ghcr.io/77owen/unifi-cam-proxy:latest
+  #   container_name: unifi-cam-backyard
+  #   restart: unless-stopped
+  #   
+  #   environment:
+  #     # Using Python streaming with SSL verification disabled
+  #     # (useful if NVR uses self-signed certificates)
+  #     - UNIFI_USE_PYTHON_STREAMING=true
+  #     - UNIFI_VERIFY_SSL=false
+  #   
   #   volumes:
-  #     - "./client2.pem:/client.pem"
+  #     - "./certs/backyard.pem:/client.pem:ro"
+  #   
   #   command: >-
-  #     --host 192.168.1.114
+  #     --host 192.168.1.100:7442
   #     --ip 10.0.1.51
-  #     --mac '02:00:00:00:00:02'
+  #     --mac "02:00:00:00:00:02"
   #     --cert /client.pem
-  #     --token YOUR_TOKEN_HERE
+  #     --token YOUR_ADOPTION_TOKEN_HERE
   #     --username admin
-  #     --password YOUR_PASSWORD
-  #     --substream "sub"
-  #     --ffmpeg-args='-c:v copy -bsf:v "h264_metadata=tick_rate=30000/1001" -ar 32000 -ac 1 -codec:a aac -b:a 32k'
+  #     --password "your_camera_password_here"
+  #     --name "Backyard"
+  #     --model "UVC G4 Bullet"
+  #     --stream main
+  #     --substream sub
+  #     --ffmpeg-args "-c:v copy -bsf:v h264_metadata=tick_rate=30000/1001 -ar 32000 -ac 1 -codec:a aac -b:a 32k"
+  #   
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+
+  # ===========================================================================
+  # Camera 3 - Garage (Reolink RLC-410 with verbose logging)
+  # ===========================================================================
+  # This example shows how to enable debug logging for troubleshooting.
+  
+  # garage:
+  #   image: ghcr.io/77owen/unifi-cam-proxy:latest
+  #   container_name: unifi-cam-garage
+  #   restart: unless-stopped
+  #   
+  #   environment:
+  #     - UNIFI_USE_PYTHON_STREAMING=true
+  #     - UNIFI_VERIFY_SSL=true
+  #   
+  #   volumes:
+  #     - "./certs/garage.pem:/client.pem:ro"
+  #   
+  #   command: >-
+  #     --host 192.168.1.100:7442
+  #     --ip 10.0.1.52
+  #     --mac "02:00:00:00:00:03"
+  #     --cert /client.pem
+  #     --token YOUR_ADOPTION_TOKEN_HERE
+  #     --username admin
+  #     --password "your_camera_password_here"
+  #     --name "Garage"
+  #     --model "UVC G3"
+  #     --stream main
+  #     --substream sub
+  #     --verbose
+  #   
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "50m"  # More log space when debugging
+  #       max-file: "5"
+
+  # ===========================================================================
+  # Camera 4 - Driveway (Using legacy shell pipeline)
+  # ===========================================================================
+  # This example shows how to fall back to the legacy streaming method.
+  # Use this if you encounter issues with the Python streaming implementation.
+  
+  # driveway:
+  #   image: ghcr.io/77owen/unifi-cam-proxy:latest
+  #   container_name: unifi-cam-driveway
+  #   restart: unless-stopped
+  #   
+  #   environment:
+  #     # Fall back to legacy shell pipeline streaming
+  #     - UNIFI_USE_PYTHON_STREAMING=false
+  #     - UNIFI_VERIFY_SSL=true
+  #   
+  #   volumes:
+  #     - "./certs/driveway.pem:/client.pem:ro"
+  #   
+  #   command: >-
+  #     --host 192.168.1.100:7442
+  #     --ip 10.0.1.53
+  #     --mac "02:00:00:00:00:04"
+  #     --cert /client.pem
+  #     --token YOUR_ADOPTION_TOKEN_HERE
+  #     --username admin
+  #     --password "your_camera_password_here"
+  #     --name "Driveway"
+  #     --model "UVC G3 Pro"
+  #     --stream main
+  #     --substream sub
+  #     --rtsp-transport tcp
+  #   
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+
+# =============================================================================
+# Additional Configuration Examples
+# =============================================================================
+#
+# Example: Using auto token generation with NVR credentials
+# ---------------------------------------------------------
+# Instead of manually getting tokens, you can provide NVR credentials:
+#
+# command: >-
+#   --host 192.168.1.100:7442
+#   --nvr-username admin
+#   --nvr-password "your_nvr_password"
+#   --ip 10.0.1.50
+#   --mac "02:00:00:00:00:01"
+#   --cert /client.pem
+#   --username admin
+#   --password "your_camera_password"
+#
+# Example: Using UDP transport for RTSP
+# -------------------------------------
+# For networks with low latency requirements:
+#
+# command: >-
+#   --rtsp-transport udp
+#   --ffmpeg-args "-c:v copy -ar 32000 -ac 1 -codec:a aac -b:a 32k"
+#
+# Example: Building from source
+# -----------------------------
+# To use a local build instead of the pre-built image:
+#
+# services:
+#   front-door:
+#     build:
+#       context: .
+#       dockerfile: Dockerfile
+#     # ... rest of configuration
+#
+# =============================================================================
+# Troubleshooting
+# =============================================================================
+#
+# 1. Camera not connecting:
+#    - Verify network connectivity: docker exec <container> ping <camera_ip>
+#    - Check credentials: Ensure username/password are correct
+#    - Verify token: Tokens expire, regenerate if needed
+#
+# 2. Stream not working:
+#    - Try UNIFI_USE_PYTHON_STREAMING=false for legacy mode
+#    - Check FFmpeg args: Some cameras need different encoding settings
+#    - Verify RTSP URL works in VLC: rtsp://user:pass@camera_ip:554/h264Preview_01_main
+#
+# 3. SSL errors:
+#    - Set UNIFI_VERIFY_SSL=false for self-signed certificates
+#    - Ensure certificate file is valid and properly mounted
+#
+# 4. High CPU usage:
+#    - Use "-c:v copy" in ffmpeg-args to avoid transcoding
+#    - Reduce stream quality with --substream
+#
+# 5. Container keeps restarting:
+#    - Check logs: docker logs <container_name>
+#    - Enable verbose mode with --verbose flag
+#
+# =============================================================================
+# Support & Documentation
+# =============================================================================
+#
+# GitHub: https://github.com/77owen/unifi-cam-proxy
+# Issues: https://github.com/77owen/unifi-cam-proxy/issues
+#
+# =============================================================================
